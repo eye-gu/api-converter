@@ -1,0 +1,7 @@
+目标: 大模型api代理转换服务
+
+- 使用java,maven,git,其他需要使用的框架想我提建议确认
+- 第一版目标:codex只支持response格式,让codex可以使用chatcompletion或者anthropic格式的api
+- 最后生成readme文档,详细描述项目的架构,设计,运行方式等
+- 后端大模型provider的api格式转换为目标工具的api格式
+- 实现代理服务器

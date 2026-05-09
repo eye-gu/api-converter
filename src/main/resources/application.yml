@@ -1,0 +1,15 @@
+spring:
+  profiles:
+    active: prod
+
+server:
+  port: 8000
+
+upstream:
+  base-url: https://api.openai.com/v1/completions
+  api-key: ${UPSTREAM_API_KEY:123}
+  model-mapping:
+    "glm-5.1": "glm-5.1"
+
+store:
+  type: ${STORE_TYPE:memory}

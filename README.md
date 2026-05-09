@@ -15,9 +15,11 @@
 - 接收 OpenAI Response API (`/v1/responses`) 格式的请求
 - 转换为 ChatCompletion 格式转发给上游 LLM
 - 将上游响应转回 Response API 格式返回给客户端
-- 支持 SSE 流式传输
+- 支持 SSE 流式传输（文本输出 + function calling）
+- 转发 Codex 的 function tools 定义到上游，支持工具调用
 - 支持 `previous_response_id` 多轮对话上下文恢复
 - 内置会话管理 Web UI
+- 上游错误时发送 `response.failed` 事件，客户端可感知并重试
 
 ## 项目结构
 
@@ -41,7 +43,7 @@ src/main/java/com/apiconverter/
 │       ├── ResponseApiResponse.java      # Response API 响应 DTO
 │       └── ResponseStreamEvent.java      # Response API 流式事件 DTO
 ├── service/
-│   └── ProxyService.java                # 代理核心逻辑（非流式 + 流式）
+│   └── ProxyService.java                # 代理核心逻辑（非流式 + 流式 + tool_calls）
 └── store/
     ├── ResponseStore.java               # 存储接口（可扩展多种后端）
     └── InMemoryResponseStore.java       # 内存实现（默认）
@@ -55,17 +57,31 @@ src/main/java/com/apiconverter/
 |---|---|---|
 | `input: "text"` | `messages: [{role: "user", content: "text"}]` | 字符串输入转为 user message |
 | `input: [{role, content}]` | `messages: [...]` | 数组输入直接映射 |
+| `role: "developer"` | `role: "system"` | developer role 映射为 system（兼容 GLM 等提供商） |
 | `instructions` | `messages: [{role: "system", content: "..."}]` | 系统指令转为 system message |
 | `previous_response_id` | 从 store 恢复历史 messages | 多轮对话上下文恢复 |
+| `tools[].type == "function"` | `tools[].function` | function 类型工具转发给上游 |
 | `max_output_tokens` | `max_tokens` | 参数名映射 |
 | `output[].content[].text` | `choices[0].message.content` | 响应输出映射 |
 
-### 流式处理
+### Function Calling 支持
 
-流式模式下，服务将上游 ChatCompletion 的 SSE 流实时转换为 Response API 的事件流格式：
+Codex 发送的 `function` 类型 tools 会自动转发给上游 LLM：
 
 ```
-response.created → response.output_item.added → response.content_part.added
+Codex tools (type=function) → ChatCompletion tools (function) → 上游 LLM → tool_calls → Response API function_call events
+```
+
+流式模式下，工具调用的 SSE 事件序列：
+
+```
+response.created → response.output_item.added (type=function_call) → response.output_item.done → response.completed
+```
+
+文本输出的事件序列：
+
+```
+response.created → response.output_item.added (type=message) → response.content_part.added
 → response.output_text.delta (持续) → response.content_part.done → response.output_item.done → response.completed
 ```
 
@@ -76,6 +92,8 @@ response.created → response.output_item.added → response.content_part.added
 2. 恢复历史 input 和 output 作为 messages
 3. 拼接当前 input 后发送给上游
 4. 新响应的 id 可作为下一次请求的 `previous_response_id`
+
+> **注意：** Codex 客户端自行管理会话状态，每次请求在 `input` 中携带完整对话历史，不依赖 `previous_response_id`。此功能为其他 Response API 客户端预留。
 
 ### 存储层架构
 
@@ -108,6 +126,17 @@ store:
 @ConditionalOnProperty(name = "store.type", havingValue = "redis")
 public class RedisResponseStore implements ResponseStore { ... }
 ```
+
+### 错误处理
+
+上游 LLM 返回错误时（如 500 网络错误），代理会发送 `response.failed` SSE 事件：
+
+```
+event: response.failed
+data: {"type":"response.failed","response":{"id":"resp_xxx","status":"failed","error":{"type":"server_error","message":"..."}}}
+```
+
+客户端收到后可显示错误信息并重试，不会卡住。
 
 ## 快速开始
 
@@ -180,8 +209,7 @@ curl -X POST http://localhost:8080/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
-    "input": "给我讲个笑话",
-    "store": true
+    "input": "给我讲个笑话"
   }'
 # 返回 {"id": "resp_xxx", ...}
 
@@ -191,7 +219,6 @@ curl -X POST http://localhost:8080/v1/responses \
   -d '{
     "model": "gpt-4o",
     "input": "再讲一个",
-    "store": true,
     "previous_response_id": "resp_xxx"
   }'
 ```
